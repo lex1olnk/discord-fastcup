@@ -3,14 +3,20 @@ package main
 import (
     "fmt"
     "net/http"
+    "fastcup/api"
 )
 
 func main() {
-    mux := http.NewServeMux()
-    mux.HandleFunc("/", handleRoot)
+    http.HandleFunc("/", handleRoot)
 
-    fmt.Println("Server listening to :8080 port")
-    http.ListenAndServe(":8080", mux)
+    http.HandleFunc("/match/", func(w http.ResponseWriter, r *http.Request) {
+        api.MatchHandler(w, r)
+    })
+
+    fmt.Println("Starting server at port 8080")
+    if err := http.ListenAndServe(":8080", nil); err != nil {
+        fmt.Printf("Error starting server: %s\n", err)
+    }
 }
 
 func handleRoot(
