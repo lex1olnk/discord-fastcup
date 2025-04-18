@@ -47,6 +47,18 @@ var matchKillsQuery = `
 	}
 `
 
+var matchCluches = `query GetMatchClutches($matchId: Int!) {
+  clutches: match_clutches(where: {match_id: {_eq: $matchId}}) {
+    roundId: round_id
+    userId: user_id
+    createdAt: created_at
+    success
+    amount
+    __typename
+  }
+}
+  `
+
 var fullMatchQuery = `query GetMatchStats($matchId: Int!, $gameId: smallint!) {
 	match: matches_by_pk(id: $matchId) {
 	  id

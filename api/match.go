@@ -12,14 +12,56 @@ import (
 
 func NewStats() *Stats {
 	return &Stats{
-		Rounds:  0,
 		Players: make(map[int]*PlayerStats),
 	}
 }
 
 // GraphQLResponse структура для GraphQL-ответа
 
-func getMatchKills(w http.ResponseWriter, r *http.Request, matchID int, stats *Stats) bool {
+func sendGraphQLRequest(w http.ResponseWriter, query string, variables map[string]int, responseBody interface{}) bool {
+	requestBody := GraphQLRequest{
+		Query:     query,
+		Variables: variables,
+	}
+
+	// Кодируем тело запроса в JSON
+	requestBodyJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		http.Error(w, "Error encoding request body", http.StatusInternalServerError)
+		return false
+	}
+
+	resp, err := http.Post("https://hasura.fastcup.net/v1/graphql", "application/json", bytes.NewBuffer(requestBodyJSON))
+	if err != nil {
+		http.Error(w, "Error fetching match data", http.StatusInternalServerError)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if err := json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
+		http.Error(w, "Error decoding response body", http.StatusInternalServerError)
+		return false
+	}
+
+	return true
+}
+
+func getMatchMembers(w http.ResponseWriter, matchID int, stats *Stats) []int {
+	query := fullMatchQuery
+
+	variables := map[string]int{
+		"matchId": matchID,
+		"gameId":  3,
+	}
+	var responseBody GetMatchStatsResponse
+	if !sendGraphQLRequest(w, query, variables, &responseBody) {
+		return nil
+	}
+
+	return stats.getMatchData(responseBody.Data.Match)
+}
+
+func getMatchKills(w http.ResponseWriter, matchID int, stats *Stats, currentPlayers []int) bool {
 	query := matchKillsQuery
 
 	variables := map[string]int{
@@ -27,37 +69,16 @@ func getMatchKills(w http.ResponseWriter, r *http.Request, matchID int, stats *S
 		//"userId":  0, // Замените на нужный userId, если требуется
 	}
 
-	requestBody := GraphQLRequest{
-		Query:     query,
-		Variables: variables,
-	}
-
-	// Кодируем тело запроса в JSON
-	requestBodyJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		http.Error(w, "Error encoding request body", http.StatusInternalServerError)
-		return false
-	}
-
-	resp, err := http.Post("https://hasura.fastcup.net/v1/graphql", "application/json", bytes.NewBuffer(requestBodyJSON))
-	if err != nil {
-		http.Error(w, "Error fetching match data", http.StatusInternalServerError)
-		return false
-	}
-	defer resp.Body.Close()
-
-	// Декодируем JSON-ответ
 	var responseBody GraphQLKillsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
-		http.Error(w, "Error decoding response body", http.StatusInternalServerError)
+	if !sendGraphQLRequest(w, query, variables, &responseBody) {
 		return false
 	}
 
-	stats.processKills(responseBody.Data.Kills)
+	stats.processKills(responseBody.Data.Kills, currentPlayers)
 	return true
 }
 
-func getMatchDamages(w http.ResponseWriter, r *http.Request, matchID int, stats *Stats) bool {
+func getMatchDamages(w http.ResponseWriter, matchID int, stats *Stats) bool {
 	query := matchDamageQuery
 
 	variables := map[string]int{
@@ -65,29 +86,9 @@ func getMatchDamages(w http.ResponseWriter, r *http.Request, matchID int, stats 
 		//"userId":  0, // Замените на нужный userId, если требуется
 	}
 
-	requestBody := GraphQLRequest{
-		Query:     query,
-		Variables: variables,
-	}
-
-	// Кодируем тело запроса в JSON
-	requestBodyJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		http.Error(w, "Error encoding request body", http.StatusInternalServerError)
-		return false
-	}
-
-	resp, err := http.Post("https://hasura.fastcup.net/v1/graphql", "application/json", bytes.NewBuffer(requestBodyJSON))
-	if err != nil {
-		http.Error(w, "Error fetching match data", http.StatusInternalServerError)
-		return false
-	}
-	defer resp.Body.Close()
-
 	// Декодируем JSON-ответ
 	var responseBody GraphQLDamagesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
-		http.Error(w, "Error decoding response body", http.StatusInternalServerError)
+	if !sendGraphQLRequest(w, query, variables, &responseBody) {
 		return false
 	}
 
@@ -105,13 +106,18 @@ func MatchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Формируем GraphQL-запрос
 	stats := NewStats()
+	currentPlayers := getMatchMembers(w, matchID, stats)
+	if currentPlayers == nil {
+		http.Error(w, "players haven't downloaded", http.StatusBadRequest)
+		return
+	}
 
-	if !getMatchKills(w, r, matchID, stats) {
+	if !getMatchKills(w, matchID, stats, currentPlayers) {
 		http.Error(w, "kills error", http.StatusBadRequest)
 		return
 	}
 
-	if !getMatchDamages(w, r, matchID, stats) {
+	if !getMatchDamages(w, matchID, stats) {
 		http.Error(w, "damages error", http.StatusBadRequest)
 		return
 	}
@@ -120,11 +126,18 @@ func MatchHandler(w http.ResponseWriter, r *http.Request) {
         <table border="1">
             <tr>
                 <th>Player ID</th>
+				<th>Nickname</th>
                 <th>Kills</th>
                 <th>Deaths</th>
                 <th>Assists</th>
                 <th>ADR</th>
                 <th>Headshots</th>
+				<th>FirstKill</th>
+				<th>FirstDeath</th>
+				<th>Traded</th>
+				<th>Exchanged</th>
+				<th>KAST</th>
+				<th>Rounds</th>
             </tr>
     `
 
@@ -132,13 +145,20 @@ func MatchHandler(w http.ResponseWriter, r *http.Request) {
 		tableHTML += fmt.Sprintf(`
             <tr>
                 <td>%d</td>
+				<td>%s</td>
                 <td>%d</td>
                 <td>%d</td>
                 <td>%d</td>
+                <td>%f</td>
                 <td>%d</td>
-                <td>%d</td>
+				<td>%d</td>
+				<td>%d</td>
+				<td>%d</td>
+				<td>%d</td>
+				<td>%f</td>
+				<td>%d</td>
             </tr>
-        `, playerID, playerStats.Kills, playerStats.Deaths, playerStats.Assists, playerStats.AverageDamage, playerStats.Headshots)
+        `, playerID, playerStats.Nickname, playerStats.Kills, playerStats.Deaths, playerStats.Assists, playerStats.AverageDamage, playerStats.Headshots, playerStats.FirstKill, playerStats.FirstDeath, playerStats.Traded, playerStats.Exchanged, playerStats.KASTScore, playerStats.Rounds)
 	}
 
 	tableHTML += `</table>`
